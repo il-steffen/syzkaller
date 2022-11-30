@@ -192,9 +192,13 @@ crush: descriptions
 reporter: descriptions
 	GOOS=$(HOSTOS) GOARCH=$(HOSTARCH) $(HOSTGO) build $(GOHOSTFLAGS) -o ./bin/syz-reporter github.com/google/syzkaller/tools/syz-reporter
 
+stress: CGO_CFLAGS=-I${EXAMPLES_ROOT} -I${EXAMPLES_ROOT}/linux-user/libnyx_agent/src
+stress: CGO_LDFLAGS=-L${EXAMPLES_ROOT}/linux-user/libnyx_agent -lnyx_agent -Wl,-rpath=${EXAMPLES_ROOT}/linux-user/libnyx_agent
 stress: CGO_ENABLED=1
 stress: descriptions
-	GOOS=$(TARGETGOOS) GOARCH=$(TARGETGOARCH) $(GO) build $(GOTARGETFLAGS) -o ./bin/$(TARGETOS)_$(TARGETVMARCH)/syz-stress$(EXE) github.com/google/syzkaller/tools/syz-stress
+	CGO_CFLAGS="-I${EXAMPLES_ROOT} -I${EXAMPLES_ROOT}/linux-user/libnyx_agent/src" \
+	CGO_LDFLAGS="-L${EXAMPLES_ROOT}/linux-user/libnyx_agent -Wl,-Bstatic -lnyx_agent -Wl,-rpath=${EXAMPLES_ROOT}/linux-user/libnyx_agent/ -Wl,-Bdynamic" \
+			   GOOS=$(TARGETGOOS) GOARCH=$(TARGETGOARCH) $(GO) build -x $(GOTARGETFLAGS) -o ./bin/$(TARGETOS)_$(TARGETVMARCH)/syz-stress$(EXE) github.com/google/syzkaller/tools/syz-stress
 
 db: descriptions
 	GOOS=$(HOSTOS) GOARCH=$(HOSTARCH) $(HOSTGO) build $(GOHOSTFLAGS) -o ./bin/syz-db github.com/google/syzkaller/tools/syz-db

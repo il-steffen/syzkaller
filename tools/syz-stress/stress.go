@@ -9,11 +9,24 @@
 // to a new OS, or when testing on a machine that is not supported by the vm package (as syz-manager cannot be used).
 package main
 
-//#include <stdio.h>
-//#include "nyx_api.h"
-//void kafl_payload_next() {
-//    kAFL_hypercall(HYPERCALL_KAFL_NEXT_PAYLOAD, 0);
-//}
+/*
+#include <stdio.h>
+#include "nyx_api.h"
+#include "libnyx_agent.h"
+
+void kafl_hprintf(const char *msg) {
+    hprintf(msg);
+}
+
+void kafl_habort(char *msg) {
+    habort(msg);
+}
+
+void kafl_payload_next() {
+    kAFL_hypercall(HYPERCALL_KAFL_NEXT_PAYLOAD, 0);
+}
+
+*/
 import "C"
 
 import (
@@ -101,7 +114,7 @@ func main() {
 	for pid := 0; pid < *flagProcs; pid++ {
 		pid := pid
 		go func() {
-			C.kafl_payload_next()
+			//C.kafl_payload_next()
 			env, err := ipc.MakeEnv(config, pid)
 			if err != nil {
 				log.Fatalf("failed to create execution environment: %v", err)
@@ -111,11 +124,9 @@ func main() {
 				log.Fatal(err)
 			}
 			rs := rand.NewSource(int64(binary.LittleEndian.Uint64(seed)))
-			for i := 0; ; i++ {
+			for i := 0; i<1; i++ {
 				var p *prog.Prog
 					p = target.Generate(rs, prog.RecommendedCalls, ct)
-					execute(pid, env, execOpts, p)
-					p.Mutate(rs, prog.RecommendedCalls, ct, nil, corpus)
 					execute(pid, env, execOpts, p)
 					p.Mutate(rs, prog.RecommendedCalls, ct, nil, corpus)
 					execute(pid, env, execOpts, p)
