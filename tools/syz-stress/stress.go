@@ -18,12 +18,16 @@ void kafl_hprintf(const char *msg) {
     hprintf(msg);
 }
 
-void kafl_habort(char *msg) {
-    habort(msg);
+void kafl_habort(const char *msg) {
+    habort_msg(msg);
 }
 
 void kafl_payload_next() {
     kAFL_hypercall(HYPERCALL_KAFL_NEXT_PAYLOAD, 0);
+}
+
+void kafl_libnyx_init() {
+    get_nyx_cpu_type();
 }
 
 */
@@ -39,7 +43,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/google/syzkaller/pkg/csource"
 	"github.com/google/syzkaller/pkg/db"
@@ -100,6 +103,7 @@ func main() {
 	if *flagSyscalls != "" {
 		syscalls = strings.Split(*flagSyscalls, ",")
 	}
+	log.Logf(0, "building call list for syscalls: %v", syscalls)
 	calls := buildCallList(target, syscalls)
 	ct := target.BuildChoiceTable(corpus, calls)
 
@@ -110,31 +114,31 @@ func main() {
 	if err = host.Setup(target, features, featuresFlags, config.Executor); err != nil {
 		log.Fatal(err)
 	}
+	C.kafl_libnyx_init()
 	gate = ipc.NewGate(2**flagProcs, nil)
 	for pid := 0; pid < *flagProcs; pid++ {
 		pid := pid
-		go func() {
-			//C.kafl_payload_next()
-			env, err := ipc.MakeEnv(config, pid)
-			if err != nil {
-				log.Fatalf("failed to create execution environment: %v", err)
-			}
-			seed, err := os.ReadFile("/tmp/payload")
-			if err != nil {
-				log.Fatal(err)
-			}
-			rs := rand.NewSource(int64(binary.LittleEndian.Uint64(seed)))
-			for i := 0; i<1; i++ {
-				var p *prog.Prog
-					p = target.Generate(rs, prog.RecommendedCalls, ct)
-					execute(pid, env, execOpts, p)
-					p.Mutate(rs, prog.RecommendedCalls, ct, nil, corpus)
-					execute(pid, env, execOpts, p)
-			}
-		}()
-	}
-	for range time.NewTicker(5 * time.Second).C {
-		log.Logf(0, "executed %v programs", atomic.LoadUint64(&statExec))
+
+		//C.kafl_payload_next()
+		env, err := ipc.MakeEnv(config, pid)
+		if err != nil {
+			log.Fatalf("failed to create execution environment: %v", err)
+		}
+		seed, err := os.ReadFile("/tmp/payload")
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		rs := rand.NewSource(int64(binary.LittleEndian.Uint64(seed)))
+		for i := 0; i<1; i++ {
+			var p *prog.Prog
+				p = target.Generate(rs, prog.RecommendedCalls, ct)
+				execute(pid, env, execOpts, p)
+				p.Mutate(rs, prog.RecommendedCalls, ct, nil, corpus)
+				execute(pid, env, execOpts, p)
+		}
+		//mystr := C.CString("syz-stress exec done!")
+		//C.kafl_habort(mystr)
 	}
 }
 
@@ -224,11 +228,11 @@ func buildCallList(target *prog.Target, enabled []string) map[*prog.Syscall]bool
 	}
 
 	for c, reason := range disabled {
-		log.Logf(0, "unsupported syscall: %v: %v", c.Name, reason)
+		log.Logf(1, "unsupported syscall: %v: %v", c.Name, reason)
 	}
 	calls, disabled = target.TransitivelyEnabledCalls(calls)
 	for c, reason := range disabled {
-		log.Logf(0, "transitively unsupported: %v: %v", c.Name, reason)
+		log.Logf(1, "transitively unsupported: %v: %v", c.Name, reason)
 	}
 	return calls
 }
