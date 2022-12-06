@@ -11,8 +11,14 @@ package main
 
 /*
 #include <stdio.h>
+#include <string.h>
 #include "nyx_api.h"
-#include "libnyx_agent.h"
+#include "nyx_agent.h"
+
+// https://pkg.go.dev/cmd/cgo#hdr-Go_references_to_C
+	
+uint8_t payload_buffer[32*4096] __attribute__((aligned(4096)));
+kAFL_payload *payload_struct = (kAFL_payload*)payload_buffer;
 
 void kafl_hprintf(const char *msg) {
     hprintf(msg);
@@ -22,12 +28,28 @@ void kafl_habort(const char *msg) {
     habort_msg(msg);
 }
 
-void kafl_payload_next() {
-    kAFL_hypercall(HYPERCALL_KAFL_NEXT_PAYLOAD, 0);
+void kafl_libnyx_init() {
+	get_nyx_cpu_type();
 }
 
-void kafl_libnyx_init() {
-    get_nyx_cpu_type();
+void kafl_agent_init()   { nyx_agent_init(1); }
+void kafl_next_payload() { hypercall(HYPERCALL_KAFL_NEXT_PAYLOAD, 0); }
+void kafl_release()      { hypercall(HYPERCALL_KAFL_RELEASE, 0); }
+void kafl_acquire()      { hypercall(HYPERCALL_KAFL_ACQUIRE, 0); }
+void kafl_panic()        { hypercall(HYPERCALL_KAFL_PANIC, 0); }
+
+void* kafl_payload_ptr() { return payload_struct->data; }
+int kafl_payload_len()   { return payload_struct->size; }
+
+uint8_t* kafl_get_payload() {
+	memset(payload_buffer, 0xff, sizeof(payload_buffer));
+	hprintf("Allocated payload buffer at 0x%08p\n", payload_buffer);
+	kAFL_payload *pld = (kAFL_payload*)payload_buffer;
+	pld->size = 42;
+	memset(pld->data, 0xff, 42);
+    hypercall(HYPERCALL_KAFL_GET_PAYLOAD, (uintptr_t)payload_buffer);
+	hprintf("Pre-init payload: %p->%p\n", pld, pld->data);
+	return payload_buffer;
 }
 
 */
@@ -35,10 +57,10 @@ import "C"
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"math/rand"
-	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -71,6 +93,12 @@ var (
 	gate     *ipc.Gate
 )
 
+func test_payload() []byte {
+	input := C.GoBytes(C.kafl_payload_ptr(), C.kafl_payload_len())
+	fmt.Printf("\nPayload: %s(%d)\n", hex.EncodeToString(input), len(input))
+	return input
+}
+
 func main() {
 	flag.Usage = func() {
 		flag.PrintDefaults()
@@ -85,6 +113,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
+
 	corpus, err := db.ReadCorpus(*flagCorpus, target)
 	if err != nil {
 		log.Fatalf("failed to read corpus: %v", err)
@@ -114,31 +143,39 @@ func main() {
 	if err = host.Setup(target, features, featuresFlags, config.Executor); err != nil {
 		log.Fatal(err)
 	}
-	C.kafl_libnyx_init()
-	gate = ipc.NewGate(2**flagProcs, nil)
-	for pid := 0; pid < *flagProcs; pid++ {
-		pid := pid
 
-		//C.kafl_payload_next()
-		env, err := ipc.MakeEnv(config, pid)
-		if err != nil {
-			log.Fatalf("failed to create execution environment: %v", err)
-		}
-		seed, err := os.ReadFile("/tmp/payload")
-		if err != nil {
-			log.Fatal(err)
-		}
+	/* kAFL init */
+	C.kafl_agent_init()
+	C.kafl_get_payload()
 
-		rs := rand.NewSource(int64(binary.LittleEndian.Uint64(seed)))
-		for i := 0; i<1; i++ {
-			var p *prog.Prog
+	// Loop for persistent mode (-R <n>)
+	for i := 0; i < 100000; i++ {
+		C.kafl_next_payload()
+		seed := test_payload()
+		C.kafl_acquire()
+		log.Logf(0, "Round %d\n", i)
+
+		gate = ipc.NewGate(2**flagProcs, nil)
+		for pid := 0; pid < *flagProcs; pid++ {
+			pid := pid
+
+			env, err := ipc.MakeEnv(config, pid)
+			if err != nil {
+				log.Fatalf("failed to create execution environment: %v", err)
+			}
+
+			rs := rand.NewSource(int64(binary.LittleEndian.Uint64(seed)))
+			for i := 0; i<1; i++ {
+				var p *prog.Prog
 				p = target.Generate(rs, prog.RecommendedCalls, ct)
 				execute(pid, env, execOpts, p)
 				p.Mutate(rs, prog.RecommendedCalls, ct, nil, corpus)
 				execute(pid, env, execOpts, p)
+			}
 		}
-		//mystr := C.CString("syz-stress exec done!")
+		//mystr := C.CString("syz-stress exec done (?)")
 		//C.kafl_habort(mystr)
+		C.kafl_release()
 	}
 }
 
@@ -150,19 +187,26 @@ func execute(pid int, env *ipc.Env, execOpts *ipc.ExecOpts, p *prog.Prog) {
 		ticket := gate.Enter()
 		defer gate.Leave(ticket)
 		outMu.Lock()
-		fmt.Printf("executing program %v\n%s\n", pid, p.Serialize())
+		log.Logf(0, "executing program %v\n%s\n", pid, p.Serialize())
 		outMu.Unlock()
 	}
-	output, _, hanged, err := env.Exec(execOpts, p)
+
+	output, info, hanged, err := env.Exec(execOpts, p)
 	if err != nil {
-		fmt.Printf("failed to execute executor: %v\n", err)
+		log.Logf(0, "PROGRAM: failed to execute executor: %v\n", err)
 	}
-	if hanged || err != nil || *flagOutput {
-		fmt.Printf("PROGRAM:\n%s\n", p.Serialize())
+	if hanged {
+		log.Logf(0, "PROGRAM: hanged")
+		return
 	}
-	if hanged || err != nil || *flagOutput {
-		os.Stdout.Write(output)
+	if len(info.Calls) == 0 {
+		log.Logf(0, "PROGRAM: no calls executed")
+		return
 	}
+	if *flagOutput {
+		log.Logf(0, "PROGRAM:\n%s\nOUTPUT:\n%s\n", p.Serialize(), output)
+	}
+	//C.kafl_release()
 }
 
 func createIPCConfig(target *prog.Target, features *host.Features, featuresFlags csource.Features) (
